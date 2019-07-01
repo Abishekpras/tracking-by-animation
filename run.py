@@ -191,7 +191,7 @@ def run_batch(batch_id, split):
     backward_time = backward(loss) if split == 'train' else 0
     if o.s == 1:
         print('Runtime: %.3fs' % (forward_time + backward_time))
-    return loss.data[0]
+    return loss.item()
 
 
 # The test function

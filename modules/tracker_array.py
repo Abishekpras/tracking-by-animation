@@ -72,7 +72,7 @@ class NTM(nn.Module):
 
         # Sort h_o_prev and y_e_prev
         if "no_rep" not in o.exp_config:
-            delta = torch.arange(0, o.O).cuda().unsqueeze(0) * 0.0001 # 1 * O
+            delta = torch.arange(0, o.O).type(torch.FloatTensor).cuda().unsqueeze(0) * 0.0001 # 1 * O
             y_e_prev_mdf = y_e_prev.squeeze(2).round() - Variable(delta)
             perm_mat = self.permutation_matrix_calculator(y_e_prev_mdf) # N * O * O
             h_o_prev = perm_mat.bmm(h_o_prev) # N * O * dim_h_o

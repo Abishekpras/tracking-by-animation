@@ -92,7 +92,7 @@ def process_batch(states, batch_id):
                     data_ind = data_id[t][o]
                     scale = scales[t][o]
                     ratio = ratios[t][o]
-                    h_, w_ = round(h * scale * ratio), round(w * scale / ratio)
+                    h_, w_ = np.round(h * scale * ratio), np.round(w * scale / ratio)
                     data_patch = data[data_ind]
                     # data_patch = utils.imresize(data[data_ind], h_, w_).unsqueeze(2)
                     # pose
@@ -129,8 +129,8 @@ def process_batch(states, batch_id):
                 data_patch = states[o][1]
                 x1, y1, vx, vy = states[o][3], states[o][4], states[o][5], states[o][6]
                 step = states[o][7]
-                x = round(x1 + step * vx)
-                y = round(y1 + step * vy)
+                x = np.round(x1 + step * vx)
+                y = np.round(y1 + step * vy)
                 if x < m-eps or x > W-1-m+eps or y < m-eps or y > H-1-m+eps: # the object disappears
                     states[o][0] = 0
                 else:
@@ -198,3 +198,4 @@ data_config = {
     'zeta_r': [1, ratio_var]
 }
 utils.save_json(data_config, path.join(output_dir, 'data_config.json'))
+Updat

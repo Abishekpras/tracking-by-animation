@@ -33,16 +33,16 @@ parser.add_argument('--init_model', default='',
 parser.add_argument('--r', type=int, default=1, choices=[0, 1],
                     help="Choose whether to remember the recurrent state from the previous sequence")
 # Training
-parser.add_argument('--epoch_num', type=int, default=500,
+parser.add_argument('--epoch_num', type=int, default=10,
                     help="The number of training epoches")
 parser.add_argument('--reset_interval', type=float, default=0.01,
                     help="Set how to reset the recurrent state, \
                     (-inf, 0): do not reset, [0, 1): the probability to reset, [1, inf): time steps to reset")
 parser.add_argument('--print_interval', type=int, default=1,
                     help="Iterations to print training messages") 
-parser.add_argument('--train_log_interval', type=int, default=100,
+parser.add_argument('--train_log_interval', type=int, default=1,
                     help="Iterations to log training messages") 
-parser.add_argument('--save_interval', type=int, default=100,
+parser.add_argument('--save_interval', type=int, default=1,
                     help="Iterations to save checkpoints (will be overwitten)") 
 parser.add_argument('--validate_interval', type=int, default=1000,
                     help="Iterations to validate model and save checkpoints") 
@@ -122,7 +122,7 @@ assert o.N % o.G == 0, 'Please ensure the mini-batch size can be divided by the 
 o.n = round(o.N / o.G)
 print("Total batch size: %d, GPU number: %d, GPU batch size: %d" % (o.N, o.G, o.n))
 
-
+print(o)
 # Initialize the model and benchmark
 net = Net(o).cuda()
 optimizer = torch.optim.Adam(net.parameters(), lr=o.lr, betas=(0.9, 0.99), weight_decay=1e-6)

@@ -2,7 +2,7 @@
 {
     "mnist": {
         "default": {
-            "O": 4,
+            "O": 10,
             "dim_y_l": 1,
             "cnn": {
                 "conv_features": [        32,         64,        128,        256,         50],

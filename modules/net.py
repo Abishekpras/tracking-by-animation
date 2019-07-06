@@ -67,7 +67,8 @@ class Net(nn.Module):
             ka['Y_b'] = Y_b_seq
         X_r_seq, area = self.renderer(y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq, **ka) # N * T * D * H * W
         area = area.unsqueeze(0)
-        print(area)
+        #print(area)
+        #print(area.shape)
 
         # Calculate the loss
         ka = {'y_e': y_e_seq}
@@ -77,7 +78,7 @@ class Net(nn.Module):
             ka['Y_b'] = Y_b_seq
             if o.metric == 0:
                 ka['y_p'] = y_p_seq
-        print(X_r_seq.shape, X_seq.shape, area.shape, ka['y_e'].shape, ka['Y_a'].shape)
+        # print(X_r_seq.shape, X_seq.shape, area.shape, ka['y_e'].shape, ka['Y_a'].shape)
         loss = self.loss_calculator(X_r_seq, X_seq, area, **ka)
         loss = loss.sum() / (o.N * o.T)
 

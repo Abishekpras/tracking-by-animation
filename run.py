@@ -149,9 +149,20 @@ def load_data(batch_id, split):
     volatile = False if split == 'train' else True
     # split = 'train'
     filename = split + '_' + str(batch_id) + '.pt'
+    if(not os.path.exists(data_dir + filename)):
+        file_nm = os.path.join(data_dir, 'input/' + filename[:-2] + 'npz')
+        X_seq = torch.from_numpy(np.load(file_nm)['patches'])
+    else:
+        X_seq = torch.load(path.join(data_dir, 'input', filename))
     kwargs = {}
-    X_seq = torch.load(path.join(data_dir, 'input', filename))
     X_seq = Variable(X_seq.float().cuda().div_(255), volatile=volatile)
+    base_file = os.path.join(data_dir, 'input', split + '_' + str(batch_id) + '_base.npz')
+    if(os.path.exists(base_file)):
+        base = np.load(base_file)
+        data = torch.from_numpy(base['data'])
+        path = torch.from_numpy(base['path'])
+        actions = torch.from_numpy(base['actions'])
+        kwargs['X_base_img'] = (data, path, actions)
     if o.bg == 1:
         X_bg_seq = torch.load(path.join(data_dir, 'bg', filename))
         kwargs['X_bg_seq'] = Variable(X_bg_seq.float().cuda().div_(255), volatile=volatile)

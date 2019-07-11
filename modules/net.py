@@ -1,3 +1,4 @@
+import os
 import os.path as path
 import numpy as np
 import torch
@@ -50,6 +51,9 @@ class Net(nn.Module):
         if 'X_bg_seq' in kwargs.keys():
             Y_b_seq = kwargs['X_bg_seq']
 
+        X_base_img = None
+        if 'X_base_img' in kwargs.keys():
+            X_base_img = kwargs['X_base_img']
         # Extract features
         X_seq_cat = torch.cat((X_seq, Variable(self.coor.clone())), 2) # N * T * D+2 * H * W
         C_o_seq = self.feature_extractor(X_seq_cat) # N * T * M * R
@@ -66,7 +70,8 @@ class Net(nn.Module):
         if o.bg == 1:
             ka['Y_b'] = Y_b_seq
         X_r_seq, area = self.renderer(y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq, **ka) # N * T * D * H * W
-        area = area.unsqueeze(0)
+        if(o.train == 0):
+            area = area.unsqueeze(0)
         #print(area)
         #print(area.shape)
 
@@ -86,6 +91,8 @@ class Net(nn.Module):
         if o.v  > 0:
             ka = {'X': X_seq, 'X_r': X_r_seq, 'y_e': y_e_seq, 'y_l': y_l_seq, 'y_p': y_p_seq, 
                   'Y_s': Y_s_seq, 'Y_a': Y_a_seq}
+            if X_base_img:
+                ka['X_base_img'] = X_base_img
             if o.bg == 1:
                 ka['Y_b'] = Y_b_seq
                 if o.metric == 1:
@@ -104,7 +111,7 @@ class Net(nn.Module):
         H, W = o.H * im_scale, o.W * im_scale
         h, w = o.h * obj_scale, o.w * obj_scale
         if o.v == 2:
-            save_dir = path.join(o.pic_dir, str(n))
+            save_dir = os.path.join(o.pic_dir, str(n))
         show_dict = {'input': kwargs['X'], 'input_recon': kwargs['X_r']}
         if o.bg == 1:
             if o.metric == 1:
@@ -131,8 +138,8 @@ class Net(nn.Module):
                     utils.imshow(img, H, W, img_kw)
                 else:
                     if img_kw == 'input' or img_kw == 'org':
-                        utils.mkdir(path.join(save_dir, img_kw))
-                        utils.imwrite(img, path.join(save_dir, img_kw, "%05d" % (tao)))
+                        utils.mkdir(os.path.join(save_dir, img_kw))
+                        utils.imwrite(img, os.path.join(save_dir, img_kw, "%05d" % (tao)))
 
             # Enforce to show object bounding boxes on the image
             if o.metric == 1 and "no_mem" not in o.exp_config:
@@ -161,8 +168,8 @@ class Net(nn.Module):
             if o.v == 1:
                 utils.imshow(img, H, W, 'X_r_vis')
             else:
-                utils.mkdir(path.join(save_dir, 'X_r_vis'))
-                utils.imwrite(img, path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'X_r_vis'))
+                utils.imwrite(img, os.path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
 
             # Objects
             y_e, Y_s, Y_a = y_e.data[0, t], Y_s.data[0, t], Y_a.data[0, t] # O * D * h * w
@@ -175,8 +182,8 @@ class Net(nn.Module):
             if o.v == 1:
                 utils.imshow(Y_o, h, w * o.O, 'Y_o', 1)
             else:
-                utils.mkdir(path.join(save_dir, 'Y_o'))
-                utils.imwrite(Y_o, path.join(save_dir, 'Y_o', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'Y_o'))
+                utils.imwrite(Y_o, os.path.join(save_dir, 'Y_o', "%05d" % (tao)))
             # utils.imshow(Y_o_v, h, w * o.O, 'Y_o_v')
             # utils.mkdir(path.join(save_dir, 'Y_o_v'))
             # utils.imwrite(Y_o_v, path.join(save_dir, 'Y_o_v', "%05d" % (tao)))
@@ -191,12 +198,16 @@ class Net(nn.Module):
                     utils.imshow(att_c, att_c.size(0)*sa, att_c.size(1)*sa, 'att')
                     utils.imshow(mem_c, mem_c.size(0)*sa, mem_c.size(1)*sa, 'mem')
                 else:
-                    utils.mkdir(path.join(save_dir, 'att'))
-                    utils.mkdir(path.join(save_dir, 'mem'))
-                    utils.imwrite(att_c, path.join(save_dir, 'att', "%05d" % (tao)))
-                    utils.imwrite(mem_c, path.join(save_dir, 'mem', "%05d" % (tao)))
+                    utils.mkdir(os.path.join(save_dir, 'att'))
+                    utils.mkdir(os.path.join(save_dir, 'mem'))
+                    utils.imwrite(att_c, os.path.join(save_dir, 'att', "%05d" % (tao)))
+                    utils.imwrite(mem_c, os.path.join(save_dir, 'mem', "%05d" % (tao)))
 
-
+        if o.v == 2:
+            if 'X_base_img' in kwargs.keys():
+                utils.mkdir(os.path.join(save_dir, 'base'))
+                data, path, actions = kwargs['X_base_img']
+                torch.save((data[n], path[n], actions[n]), os.path.join(save_dir, 'base', str(o.batch_id) + '.pt')) 
     def reset_states(self):
         for state in self.states.values():
             state.fill_(0)

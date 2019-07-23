@@ -11,7 +11,30 @@ from modules.loss_calculator import LossCalculator
 import modules.submodules as smd
 import modules.utils as utils
 
+def coords(H, W):
+        dh, dw = 2/(H-1), 2/(W-1)
+        coor_y = torch.arange(-1, 1+1e-5, dh).cuda().view(H, 1)
+        coor_x = torch.arange(-1, 1+1e-5, dw).cuda().view(1, W)
+        return coor_x.expand(H, W), coor_y.expand(H, W)
 
+def local_coords(o, H, W):        
+        coor_x, coor_y = coords(H, W)
+        coor_x = coor_x.view(1, 1, 1, H, W).expand(o.N, o.T, 1, H, W)
+        coor_y = coor_y.view(1, 1, 1, H, W).expand(o.N, o.T, 1, H, W)
+        coor = torch.cat((coor_y, coor_x), 2) # N * T * 2 * H * W
+        return coor
+
+def global_coords(o, H, W, path, h, w, border=20):
+        coor_x, coor_y = coords(H + 2*border, W + 2*border)
+        x, y = (path + torch.Tensor([border, border])).unbind(2)
+        pos_x, pos_y = x - int(h // 2), y - int(w // 2)
+        global_coords = torch.zeros((o.N, o.T, 2, h, w)).cuda()
+        for n in range(o.N):
+            for t in range(o.T):
+                tx, ty = int(pos_x[n, t].item()), int(pos_y[n, t].item())
+                global_coords[n, t, 0] = coor_y[tx: tx + h, ty: ty + w]
+                global_coords[n, t, 1] = coor_x[tx: tx + h, ty: ty + w]
+        return global_coords
 
 class Net(nn.Module):
 
@@ -28,15 +51,6 @@ class Net(nn.Module):
         self.renderer_vis = Renderer(o)
         self.loss_calculator = nn.DataParallel(LossCalculator(o), device_ids)
         
-        # Coordinates
-        zeros = torch.Tensor(o.N, o.T, 1, o.H, o.W).cuda().fill_(0) # N * T * 1 * H * W
-        dh, dw = 2/(o.H-1), 2/(o.W-1)
-        coor_y = torch.arange(-1, 1+1e-5, dh).cuda().view(1, 1, 1, o.H, 1) # 1 * 1 * 1 * H * 1
-        coor_x = torch.arange(-1, 1+1e-5, dw).cuda().view(1, 1, 1, 1, o.W) # 1 * 1 * 1 * 1 * W
-        coor_y = coor_y + zeros # N * T * 1 * H * W
-        coor_x = coor_x + zeros # N * T * 1 * H * W
-        self.coor = torch.cat((coor_y, coor_x), 2) # N * T * 2 * H * W
-
         # States
         self.states = {}
         self.states['h_o_prev'] = torch.Tensor(o.N, o.O, o.dim_h_o).cuda()
@@ -52,28 +66,45 @@ class Net(nn.Module):
             Y_b_seq = kwargs['X_bg_seq']
 
         X_base_img = None
+        data, path, actions, phase = None, None, None, None
+        coords_info = local_coords(o, o.H, o.W)
         if 'X_base_img' in kwargs.keys():
             X_base_img = kwargs['X_base_img']
+            data, path, actions, phase = [X_base_img[i] for i in range(4)]
+            _, H, W = data.shape
+            coords_info = global_coords(o, H, W, path, o.H, o.W, border=20)
+            if(sum(actions[:, 0]) < 0):
+                self.reset_states()
+                self.memory = None
+
         # Extract features
-        X_seq_cat = torch.cat((X_seq, Variable(self.coor.clone())), 2) # N * T * D+2 * H * W
+        X_seq_cat = torch.cat((X_seq, Variable(coords_info.clone())), 2) # N * T * D+2 * H * W
         C_o_seq = self.feature_extractor(X_seq_cat) # N * T * M * R
         C_o_seq = smd.CheckBP('C_o_seq')(C_o_seq)
 
         # Update trackers
         h_o_prev, y_e_prev = self.load_states('h_o_prev', 'y_e_prev')
-        h_o_seq, y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq = self.tracker_array(h_o_prev, y_e_prev, C_o_seq) # N * T * O * ...
+        if (phase == 'pred'):
+            print('$$$$$$$$' * 5)
+            if (self.memory is None):
+                self.memory = h_o_prev
+            h_o_seq, y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq = self.tracker_array(self.memory, y_e_prev, C_o_seq, path, phase)
+        else:
+            self.memory = None
+            h_o_seq, y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq = self.tracker_array(h_o_prev, y_e_prev, C_o_seq, path, phase) # N * T * O * ...
         if o.r == 1:
             self.save_states(h_o_prev=h_o_seq, y_e_prev=y_e_seq)
 
-        # Render the image using tracker outputs
+        if(phase == 'obs'):
+            return None
+
+        # Render the image
         ka = {}
         if o.bg == 1:
             ka['Y_b'] = Y_b_seq
         X_r_seq, area = self.renderer(y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq, **ka) # N * T * D * H * W
         if(o.train == 0):
             area = area.unsqueeze(0)
-        #print(area)
-        #print(area.shape)
 
         # Calculate the loss
         ka = {'y_e': y_e_seq}
@@ -100,7 +131,7 @@ class Net(nn.Module):
             self.visualize(**ka)
 
         return loss
-
+        
 
     def visualize(self, **kwargs):
         o = self.o
@@ -138,8 +169,8 @@ class Net(nn.Module):
                     utils.imshow(img, H, W, img_kw)
                 else:
                     if img_kw == 'input' or img_kw == 'org':
-                        utils.mkdir(os.path.join(save_dir, img_kw))
-                        utils.imwrite(img, os.path.join(save_dir, img_kw, "%05d" % (tao)))
+                        utils.mkdir(path.join(save_dir, img_kw))
+                        utils.imwrite(img, path.join(save_dir, img_kw, "%05d" % (tao)))
 
             # Enforce to show object bounding boxes on the image
             if o.metric == 1 and "no_mem" not in o.exp_config:
@@ -168,8 +199,8 @@ class Net(nn.Module):
             if o.v == 1:
                 utils.imshow(img, H, W, 'X_r_vis')
             else:
-                utils.mkdir(os.path.join(save_dir, 'X_r_vis'))
-                utils.imwrite(img, os.path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
+                utils.mkdir(path.join(save_dir, 'X_r_vis'))
+                utils.imwrite(img, path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
 
             # Objects
             y_e, Y_s, Y_a = y_e.data[0, t], Y_s.data[0, t], Y_a.data[0, t] # O * D * h * w
@@ -182,12 +213,12 @@ class Net(nn.Module):
             if o.v == 1:
                 utils.imshow(Y_o, h, w * o.O, 'Y_o', 1)
             else:
-                utils.mkdir(os.path.join(save_dir, 'Y_o'))
-                utils.imwrite(Y_o, os.path.join(save_dir, 'Y_o', "%05d" % (tao)))
+                utils.mkdir(path.join(save_dir, 'Y_o'))
+                utils.imwrite(Y_o, path.join(save_dir, 'Y_o', "%05d" % (tao)))
             # utils.imshow(Y_o_v, h, w * o.O, 'Y_o_v')
             # utils.mkdir(path.join(save_dir, 'Y_o_v'))
             # utils.imwrite(Y_o_v, path.join(save_dir, 'Y_o_v', "%05d" % (tao)))
-
+            
             # Attention and memory
             if o.task != 'duke':
                 cmap='hot'

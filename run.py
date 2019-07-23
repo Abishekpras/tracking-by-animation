@@ -33,7 +33,7 @@ parser.add_argument('--init_model', default='',
 parser.add_argument('--r', type=int, default=1, choices=[0, 1],
                     help="Choose whether to remember the recurrent state from the previous sequence")
 # Training
-parser.add_argument('--epoch_num', type=int, default=10,
+parser.add_argument('--epoch_num', type=int, default=15,
                     help="The number of training epoches")
 parser.add_argument('--reset_interval', type=float, default=0.01,
                     help="Set how to reset the recurrent state, \
@@ -44,7 +44,7 @@ parser.add_argument('--train_log_interval', type=int, default=1,
                     help="Iterations to log training messages") 
 parser.add_argument('--save_interval', type=int, default=1,
                     help="Iterations to save checkpoints (will be overwitten)") 
-parser.add_argument('--validate_interval', type=int, default=1000,
+parser.add_argument('--validate_interval', type=int, default=2000,
                     help="Iterations to validate model and save checkpoints") 
 # Optimization
 parser.add_argument('--lr', type=float, default=5e-4,
@@ -146,29 +146,34 @@ print('Parameter number: %.3f M' % (param_num / 1024 / 1024))
 # o.test_batch_num = o.train_batch_num
 # Data loader
 def load_data(batch_id, split):
+    kwargs = {}
     volatile = False if split == 'train' else True
     # split = 'train'
     filename = split + '_' + str(batch_id) + '.pt'
     if(not os.path.exists(data_dir + filename)):
         file_nm = os.path.join(data_dir, 'input/' + filename[:-2] + 'npz')
-        X_seq = torch.from_numpy(np.load(file_nm)['patches'])
+        data_file = np.load(file_nm)
+        X_seq = torch.from_numpy(data_file['patches'])
+        base_data_file = os.path.join(data_dir, 'input/' + filename[:-3] + '_base.npz')
+        base_data = np.load(base_data_file) 
+        data = torch.from_numpy(base_data['data'])
+        path = torch.from_numpy(base_data['path'])
+        actions = torch.from_numpy(base_data['actions'])
+        obs_steps = 80
+        T = path.size(1)
+        phase = 'pred' if (batch_id % T) >= int(obs_steps // T) else 'obs'
+        kwargs['X_base_img'] = (data, path, actions, phase)
     else:
         X_seq = torch.load(path.join(data_dir, 'input', filename))
-    kwargs = {}
     X_seq = Variable(X_seq.float().cuda().div_(255), volatile=volatile)
-    base_file = os.path.join(data_dir, 'input', split + '_' + str(batch_id) + '_base.npz')
-    if(os.path.exists(base_file)):
-        base = np.load(base_file)
-        data = torch.from_numpy(base['data'])
-        path = torch.from_numpy(base['path'])
-        actions = torch.from_numpy(base['actions'])
-        kwargs['X_base_img'] = (data, path, actions)
     if o.bg == 1:
         X_bg_seq = torch.load(path.join(data_dir, 'bg', filename))
         kwargs['X_bg_seq'] = Variable(X_bg_seq.float().cuda().div_(255), volatile=volatile)
         if o.metric == 1:
             X_org_seq = torch.load(path.join(data_dir, 'org', filename))
             kwargs['X_org_seq'] = Variable(X_org_seq.float().cuda().div_(255), volatile=volatile)
+    #print(X_seq.shape)
+    #print('#######################')
     return X_seq, kwargs
 
 
@@ -199,6 +204,10 @@ def backward(loss):
 def run_batch(batch_id, split):
     X_seq, kwargs = load_data(batch_id, split)
     loss, forward_time = forward(X_seq, **kwargs)
+
+    if loss is None:
+        return 0
+
     backward_time = backward(loss) if split == 'train' else 0
     if o.s == 1:
         print('Runtime: %.3fs' % (forward_time + backward_time))

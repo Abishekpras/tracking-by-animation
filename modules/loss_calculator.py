@@ -30,6 +30,7 @@ class LossCalculator(nn.Module):
         lam_t = 0.1 if o.task == 'duke' else 13
         loss_tight = lam_t * area
         loss = loss + loss_tight
+        # print(loss_tight.shape)
         losses['tight'] = loss_tight.item()
 
         # Entropy loss of y_e

@@ -33,7 +33,7 @@ parser.add_argument('--init_model', default='',
 parser.add_argument('--r', type=int, default=1, choices=[0, 1],
                     help="Choose whether to remember the recurrent state from the previous sequence")
 # Training
-parser.add_argument('--epoch_num', type=int, default=15,
+parser.add_argument('--epoch_num', type=int, default=5,
                     help="The number of training epoches")
 parser.add_argument('--reset_interval', type=float, default=0.01,
                     help="Set how to reset the recurrent state, \
@@ -82,6 +82,7 @@ data_config = utils.load_json(path.join(data_dir, 'data_config.json'))
 for k, v in data_config.items():
     vars(o)[k] = v
 print("Task: " + o.task)
+print(o.W)
 # Load experiment configuration
 o.exp_config = utils.load_json('modules/exp_config.json')[o.exp]
 print("Experiment: " + o.exp)
@@ -159,9 +160,11 @@ def load_data(batch_id, split):
         data = torch.from_numpy(base_data['data'])
         path = torch.from_numpy(base_data['path'])
         actions = torch.from_numpy(base_data['actions'])
-        obs_steps = 80
+        obs_steps = 20
+        pred_steps = 10
         T = path.size(1)
-        phase = 'pred' if (batch_id % T) >= int(obs_steps // T) else 'obs'
+        n_seq = int((obs_steps + pred_steps) // T)
+        phase = 'pred' if (batch_id % n_seq) >= int(obs_steps // T) else 'obs'
         kwargs['X_base_img'] = (data, path, actions, phase)
     else:
         X_seq = torch.load(path.join(data_dir, 'input', filename))

@@ -74,12 +74,25 @@ def main():
             y = [sum(y[i-smooth_pad:i+smooth_pad+1])/(smooth_pad*2+1) for i in range(smooth_pad, smooth_pad+num)]
         y = [y[p] for p in range(0, num, o.step)]
         h, = plt.plot(x, y, label=lines[exp][0], marker=lines[exp][1], color=lines[exp][2])
+        #x, y = np.array(x), np.array(y)
+        #mini = 100
+        #for ix in range(len(y)):
+        #    if ix > 90000:
+        #        break
+        #    if y[ix] > 0 and y[ix] < mini:
+        #        mini = y[ix]
+        #        z = ix
+        #print(x.shape, y.shape)
+        #print(z, y[z], x[z], mini)
+        #for i in range(24):
+        #    z = 69999 + (2000 * i)
+        #    print(z, y[z])
         handles = [h] + handles
     plt.legend(handles = handles)
     xlabel = 'Iteration' if o.xepoch == 0 else 'Epoch'
     plt.xlabel(xlabel)
     plt.ylabel('Validation Loss')
-    plt.show()
+    plt.savefig('op.png')
 
 
 def load_single_result(exp):

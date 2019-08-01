@@ -72,10 +72,13 @@ class Net(nn.Module):
             X_base_img = kwargs['X_base_img']
             data, path, actions, phase = [X_base_img[i] for i in range(4)]
             _, H, W = data.shape
-            coords_info = global_coords(o, H, W, path, o.H, o.W, border=20)
+            #coords_info = global_coords(o, H, W, path, o.H, o.W, border=20)
             if(sum(actions[:, 0]) < 0):
+                print('%%%%%%%%%%'*5)
                 self.reset_states()
                 self.memory = None
+                self.obs_loss = 0
+                o.new_track = True
 
         # Extract features
         X_seq_cat = torch.cat((X_seq, Variable(coords_info.clone())), 2) # N * T * D+2 * H * W
@@ -85,18 +88,34 @@ class Net(nn.Module):
         # Update trackers
         h_o_prev, y_e_prev = self.load_states('h_o_prev', 'y_e_prev')
         if (phase == 'pred'):
-            print('$$$$$$$$' * 5)
+            print('@@@@@$$$$$$$$' * 5)
             if (self.memory is None):
                 self.memory = h_o_prev
             h_o_seq, y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq = self.tracker_array(self.memory, y_e_prev, C_o_seq, path, phase)
+            #results = self.tracker_array.ntm.generate_outputs(self.memory)
+            #print([results[i].shape for i in range(len(results))])
         else:
             self.memory = None
             h_o_seq, y_e_seq, y_l_seq, y_p_seq, Y_s_seq, Y_a_seq = self.tracker_array(h_o_prev, y_e_prev, C_o_seq, path, phase) # N * T * O * ...
         if o.r == 1:
             self.save_states(h_o_prev=h_o_seq, y_e_prev=y_e_seq)
 
+        '''
         if(phase == 'obs'):
+            n = 0
+            if o.train == 0:
+                save_dir = os.path.join(o.pic_dir, str(n))
+                for t in range(0, o.T):
+                    img = X_seq.data[n, t].permute(1, 2, 0).clamp(0, 1)
+                    tao = o.batch_id * o.T + t
+                    utils.mkdir(os.path.join(save_dir, 'input'))
+                    utils.imwrite(img, os.path.join(save_dir, 'input', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'base'))
+                data, path, actions, phase = X_base_img
+                torch.save((data[n], path[n], actions[n]), os.path.join(save_dir, 'base', str(o.batch_id) + '.pt'))
+
             return None
+        '''
 
         # Render the image
         ka = {}
@@ -118,6 +137,22 @@ class Net(nn.Module):
         loss = self.loss_calculator(X_r_seq, X_seq, area, **ka)
         loss = loss.sum() / (o.N * o.T)
 
+        if(phase == 'obs'):
+            n = 0
+            if o.train == 0:
+                save_dir = os.path.join(o.pic_dir, str(n))
+                for t in range(0, o.T):
+                    img = X_seq.data[n, t].permute(1, 2, 0).clamp(0, 1)
+                    tao = o.batch_id * o.T + t
+                    utils.mkdir(os.path.join(save_dir, 'input'))
+                    utils.imwrite(img, os.path.join(save_dir, 'input', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'base'))
+                data, path, actions, phase = X_base_img
+                torch.save((data[n], path[n], actions[n]), os.path.join(save_dir, 'base', str(o.batch_id) + '.pt'))
+            self.obs_loss += loss
+            print('Loss: {}'.format(loss))
+            return None
+        
         # Visualize
         if o.v  > 0:
             ka = {'X': X_seq, 'X_r': X_r_seq, 'y_e': y_e_seq, 'y_l': y_l_seq, 'y_p': y_p_seq, 
@@ -130,6 +165,7 @@ class Net(nn.Module):
                     ka['X_org'] = kwargs['X_org_seq']
             self.visualize(**ka)
 
+        print('Obs_loss: {}'.format(self.obs_loss))
         return loss
         
 
@@ -169,8 +205,8 @@ class Net(nn.Module):
                     utils.imshow(img, H, W, img_kw)
                 else:
                     if img_kw == 'input' or img_kw == 'org':
-                        utils.mkdir(path.join(save_dir, img_kw))
-                        utils.imwrite(img, path.join(save_dir, img_kw, "%05d" % (tao)))
+                        utils.mkdir(os.path.join(save_dir, img_kw))
+                        utils.imwrite(img, os.path.join(save_dir, img_kw, "%05d" % (tao)))
 
             # Enforce to show object bounding boxes on the image
             if o.metric == 1 and "no_mem" not in o.exp_config:
@@ -199,22 +235,24 @@ class Net(nn.Module):
             if o.v == 1:
                 utils.imshow(img, H, W, 'X_r_vis')
             else:
-                utils.mkdir(path.join(save_dir, 'X_r_vis'))
-                utils.imwrite(img, path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'X_r_vis'))
+                utils.imwrite(img, os.path.join(save_dir, 'X_r_vis', "%05d" % (tao)))
 
             # Objects
             y_e, Y_s, Y_a = y_e.data[0, t], Y_s.data[0, t], Y_a.data[0, t] # O * D * h * w
             if o.task == 'mnist':
-                Y_o = (y_e.view(-1, 1, 1, 1) * Y_a).permute(2, 0, 3, 1).contiguous().view(o.h, o.O*o.w, o.D)
-                Y_o_v = (y_e.view(-1, 1, 1, 1) * Y_a).permute(0, 2, 3, 1).contiguous().view(o.O*o.h, o.w, o.D)
+                #print(y_e)
+                y_e_save = torch.ones_like(y_e)
+                Y_o = (y_e_save.view(-1, 1, 1, 1) * Y_a).permute(2, 0, 3, 1).contiguous().view(o.h, o.O*o.w, o.D)
+                Y_o_v = (y_e_save.view(-1, 1, 1, 1) * Y_a).permute(0, 2, 3, 1).contiguous().view(o.O*o.h, o.w, o.D)
             else:
                 Y_o = (y_e.view(-1, 1, 1, 1) * Y_s * Y_a).permute(2, 0, 3, 1).contiguous().view(o.h, o.O*o.w, o.D)
                 Y_o_v = (y_e.view(-1, 1, 1, 1) * Y_a * Y_a).permute(0, 2, 3, 1).contiguous().view(o.O*o.h, o.w, o.D)
             if o.v == 1:
                 utils.imshow(Y_o, h, w * o.O, 'Y_o', 1)
             else:
-                utils.mkdir(path.join(save_dir, 'Y_o'))
-                utils.imwrite(Y_o, path.join(save_dir, 'Y_o', "%05d" % (tao)))
+                utils.mkdir(os.path.join(save_dir, 'Y_o'))
+                utils.imwrite(Y_o, os.path.join(save_dir, 'Y_o', "%05d" % (tao)))
             # utils.imshow(Y_o_v, h, w * o.O, 'Y_o_v')
             # utils.mkdir(path.join(save_dir, 'Y_o_v'))
             # utils.imwrite(Y_o_v, path.join(save_dir, 'Y_o_v', "%05d" % (tao)))
@@ -237,7 +275,7 @@ class Net(nn.Module):
         if o.v == 2:
             if 'X_base_img' in kwargs.keys():
                 utils.mkdir(os.path.join(save_dir, 'base'))
-                data, path, actions = kwargs['X_base_img']
+                data, path, actions, phase = kwargs['X_base_img']
                 torch.save((data[n], path[n], actions[n]), os.path.join(save_dir, 'base', str(o.batch_id) + '.pt')) 
     def reset_states(self):
         for state in self.states.values():

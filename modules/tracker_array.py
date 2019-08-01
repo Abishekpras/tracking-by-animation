@@ -5,13 +5,14 @@ import torch.nn as nn
 from torch.autograd import Variable
 import modules.submodules as smd
 import modules.utils as utils
-
+from scipy.spatial import cKDTree
 
 class TrackerArray(nn.Module):
     
     def __init__(self, o):
         super(TrackerArray, self).__init__()
         self.o = o
+        self.ctr = -1
         self.ntm = NTM(o)
 
     def forward(self, h_o_prev, y_e_prev, C_o_seq, path, phase):
@@ -21,6 +22,11 @@ class TrackerArray(nn.Module):
         C_o_seq:  N * T * C2_1 * C2_2
         '"""
         o = self.o
+        if o.new_track:
+            self.mem = torch.zeros(o.N, o.O, 2).cuda()
+            o.new_track = False
+            self.ctr += 1
+
         # Split the input
         C_o = torch.unbind(C_o_seq, dim=1) # N * C2_1 * C2_2
         # Iterate over time
@@ -29,8 +35,10 @@ class TrackerArray(nn.Module):
             self.ntm.t = t
             self.ntm.ntm_cell.t = t
             pos = None if path is None else path[:, t].cuda()
-            h_o[t], y_e[t], y_l[t], y_p[t], Y_s[t], Y_a[t] = self.ntm(h_o_prev, y_e_prev, C_o[t], pos, phase) # N * O * dim_xx
+            self.mem, h_o[t], y_e[t], y_l[t], y_p[t], Y_s[t], Y_a[t] = self.ntm(h_o_prev, y_e_prev, C_o[t], pos, phase, self.mem) # N * O * dim_xx
             h_o_prev, y_e_prev = h_o[t], y_e[t]
+            torch.save(self.mem[0], './plot_data/digits_memory_{}_{}.pt'.format(self.ctr, t))
+            torch.save(y_e_prev[0], './plot_data/y_confidence_{}_{}.pt'.format(self.ctr, t))
 
         # Merge the states
         h_o_seq = torch.stack(tuple(h_o.values()), dim=1) # N * T * O * dim_h_o
@@ -47,7 +55,7 @@ class NTM(nn.Module):
     def __init__(self, o):
         super(NTM, self).__init__()
         self.o = o
-        dim_y = o.dim_y_e + o.dim_y_l + o.dim_y_p + o.dim_Y_s + o.dim_Y_a
+        dim_y = o.dim_y_l + o.dim_y_p + o.dim_Y_s + o.dim_Y_a
         fcn_params = [o.dim_h_o] + o.fcn + [dim_y]
         self.fcn = smd.FCN(fcn_params, hid_trans='relu', out_trans=None)
         self.softmax = nn.Softmax(dim=1)
@@ -55,127 +63,150 @@ class NTM(nn.Module):
         self.st_gumbel_softmax = smd.STGumbelSoftmax(1)
         self.permutation_matrix_calculator = smd.PermutationMatrixCalculator()
         self.ntm_cell = NTMCell(o)
+        self.linear_pos_to_conf = nn.Linear(2, 1)
+        self.linear_h_to_conf = nn.Linear(2, 1)
         self.t = 0
         self.att = torch.Tensor(o.T, o.O, self.ntm_cell.ha, self.ntm_cell.wa).cuda()
         self.mem = torch.Tensor(o.T, o.O, self.ntm_cell.ha, self.ntm_cell.wa).cuda()
 
-    def forward(self, h_o_prev, y_e_prev, C_o, pos, phase):
+    def forward(self, h_o_prev, y_e_prev, C_o, pos, phase, memor):
         """
         h_o_prev: N * O * dim_h_o
         y_e_prev: N * O * dim_y_e
         C_o:      N * C2_1 * C2_2
         """
         o = self.o
-        if(phase == 'pred'):
-            y_e, y_l, y_p, Y_s, Y_a = self.generate_outputs(h_o_prev, pos, phase)
-            return h_o_prev, y_e, y_l, y_p, Y_s, Y_a
-
-        if "no_tem" in o.exp_config:
-            h_o_prev = Variable(torch.zeros_like(h_o_prev).cuda())
-            y_e_prev = Variable(torch.zeros_like(y_e_prev).cuda())
-
-        # Sort h_o_prev and y_e_prev
-        if "no_rep" not in o.exp_config:
-            delta = torch.arange(0, o.O).type(torch.FloatTensor).cuda().unsqueeze(0) * 0.0001 # 1 * O
-            y_e_prev_mdf = y_e_prev.squeeze(2).round() - Variable(delta)
-            perm_mat = self.permutation_matrix_calculator(y_e_prev_mdf) # N * O * O
-            h_o_prev = perm_mat.bmm(h_o_prev) # N * O * dim_h_o
-            y_e_prev = perm_mat.bmm(y_e_prev) # N * O * dim_y_e
-
-        # Update h_o
-        h_o_prev_split = torch.unbind(h_o_prev, 1) # N * dim_h_o
-        h_o_split = {}
-        k_split = {}
-        r_split = {}
-        for i in range(0, o.O):
-            self.ntm_cell.i = i
-            h_o_split[i], C_o, k_split[i], r_split[i] = self.ntm_cell(h_o_prev_split[i], C_o, pos, phase)
-        h_o = torch.stack(tuple(h_o_split.values()), dim=1) # N * O * dim_h_o
-        k = torch.stack(tuple(k_split.values()), dim=1) # N * O * C2_2
-        r = torch.stack(tuple(r_split.values()), dim=1) # N * O * C2_2
-        att = self.ntm_cell.att
-        mem = self.ntm_cell.mem
-
-        # Recover the original order of h_o
-        if "no_rep" not in o.exp_config:
-            perm_mat_inv = perm_mat.transpose(1, 2) # N * O * O
-            h_o = perm_mat_inv.bmm(h_o) # N * O * dim_h_o
-            k = perm_mat_inv.bmm(k) # N * O * dim_c_2
-            r = perm_mat_inv.bmm(r) # N * O * dim_c_2
-            att = perm_mat_inv.data[self.ntm_cell.n].mm(att.view(o.O, -1)).view(o.O, -1, self.ntm_cell.wa) # O * ha * wa
-            mem = perm_mat_inv.data[self.ntm_cell.n].mm(mem.view(o.O, -1)).view(o.O, -1, self.ntm_cell.wa) # O * ha * wa
+        perm_mat = torch.zeros(o.N, o.O, o.O)
+        m = memor.cpu().detach()
+        p = pos.cpu()
+        for i in range(o.N):
+            tree = cKDTree(m[i])
+            r = tree.query(p[i], k=10)[1].reshape(-1)
+            #r = np.array(r.tolist() + [sum(range(o.O)) - r.sum()])
+            #print(r, p[i].tolist(), m[i].tolist())
+            if(r.sum() != sum(range(o.O))):
+                print(m[i])
+                print(p[i])
+                print(r)
+            perm_mat[i, torch.arange(o.O), r] = 1
+        perm_mat = perm_mat.cuda()
+        perm_mat_inv = perm_mat.transpose(1, 2)
         
-        if o.v > 0:
-            self.att[self.t].copy_(att)
-            self.mem[self.t].copy_(mem)
+        #pos = pos / 120
+        #inp = pos.unsqueeze(1).expand(o.N, o.O, 2).contiguous().view(-1, 2)
+        #y_e_prev = self.linear_pos_to_conf(inp).tanh().abs().view(o.N, o.O, o.dim_y_e)
+        #if "no_rep" not in o.exp_config:
+        #    if o.train == 0:
+        #        print(y_e_prev[0].view(-1))
+        #    delta = torch.arange(0, o.O).type(torch.FloatTensor).cuda().unsqueeze(0) * 0.0001 # 1 * O
+        #    y_e_prev_mdf = y_e_prev.squeeze(2).round() - Variable(delta)
+        #    perm_mat = self.permutation_matrix_calculator(y_e_prev_mdf) # N * O * O
+        #    perm_mat_inv = perm_mat.transpose(1, 2) # N * O * O
+    
+        if phase == 'obs':
+            #if "no_tem" in o.exp_config:
+            #    h_o_prev = Variable(torch.zeros_like(h_o_prev).cuda())W3
+            #    y_e_prev = Variable(torch.zeros_like(y_e_prev).cuda())
 
-        y_e, y_l, y_p, Y_s, Y_a = self.generate_outputs(h_o, pos, phase)
+            # Sort h_o_prev and y_e_prev
+            if "no_rep" not in o.exp_config:
+                h_o_prev = perm_mat.bmm(h_o_prev) # N * O * dim_h_o
+            #    y_e_prev = perm_mat.bmm(y_e_prev) # N * O * dim_y_e
+            #    if o.train == 0:
+            #        print('Shuffled:')
+            #        print(y_e_prev[0].view(-1))
+
+            # Update h_o
+            h_o_prev_split = torch.unbind(h_o_prev, 1) # N * dim_h_o
+            h_o_split = {}
+            k_split = {}
+            r_split = {}
+            for i in range(0, o.O):
+                self.ntm_cell.i = i
+                h_o_split[i], C_o, k_split[i], r_split[i] = self.ntm_cell(h_o_prev_split[i], C_o, pos, phase)
+            h_o = torch.stack(tuple(h_o_split.values()), dim=1) # N * O * dim_h_o
+            k = torch.stack(tuple(k_split.values()), dim=1) # N * O * C2_2
+            r = torch.stack(tuple(r_split.values()), dim=1) # N * O * C2_2
+            att = self.ntm_cell.att
+            mem = self.ntm_cell.mem
+
+            # Recover the original order of h_o
+            if "no_rep" not in o.exp_config:
+                #perm_mat_inv = perm_mat.transpose(1, 2) # N * O * O
+                h_o = perm_mat_inv.bmm(h_o) # N * O * dim_h_o
+                k = perm_mat_inv.bmm(k) # N * O * dim_c_2
+                r = perm_mat_inv.bmm(r) # N * O * dim_c_2
+                att = perm_mat_inv.data[self.ntm_cell.n].mm(att.view(o.O, -1)).view(o.O, -1, self.ntm_cell.wa) # O * ha * wa
+                mem = perm_mat_inv.data[self.ntm_cell.n].mm(mem.view(o.O, -1)).view(o.O, -1, self.ntm_cell.wa) # O * ha * wa
+                h_o_prev = perm_mat_inv.bmm(h_o_prev)
+                #y_e_prev = perm_mat_inv.bmm(y_e_prev)
+            
+            if o.v > 0:
+                self.att[self.t].copy_(att)
+                self.mem[self.t].copy_(mem)
+        else:
+            h_o = h_o_prev
+
+        y_e, y_l, y_p, Y_s, Y_a = self.generate_outputs(h_o, pos)
 
         # adaptive computation time
         if "act" in o.exp_config:
-            y_e_perm = perm_mat.bmm(y_e).round() # N * O * dim_y_e
-            y_e_mask = y_e_prev.round() + y_e_perm  # N * O * dim_y_e
-            y_e_mask = y_e_mask.lt(0.5).type_as(y_e_mask)
-            y_e_mask = y_e_mask.cumsum(1)
-            y_e_mask = y_e_mask.lt(0.5).type_as(y_e_mask)
-            ones = Variable(torch.ones(y_e_mask.size(0), 1, o.dim_y_e).cuda())  # N * 1 * dim_y_e
-            y_e_mask = torch.cat((ones, y_e_mask[:, 0:o.O-1]), dim=1)
-            y_e_mask = perm_mat_inv.bmm(y_e_mask)  # N * O * dim_y_e
+            #y_e_perm = perm_mat.bmm(y_e).round() # N * O * dim_y_e
+            #y_e_mask = y_e_prev.round() + y_e_perm  # N * O * dim_y_e
+            # y_e_mask = y_e_perm
+            #y_e_mask = perm_mat.bmm(y_e).round() # N * O * dim_y_e
+            #y_e_mask = y_e_mask.lt(0.5).type_as(y_e_mask)
+            #y_e_mask = y_e_mask.cumsum(1)
+            #y_e_mask = y_e_mask.lt(0.5).type_as(y_e_mask)
+            #ones = Variable(torch.ones(y_e_mask.size(0), 1, o.dim_y_e).cuda())  # N * 1 * dim_y_e
+            #y_e_mask = torch.cat((ones, y_e_mask[:, 0:o.O-1]), dim=1)
+            #y_e_mask = perm_mat_inv.bmm(y_e_mask)  # N * O * dim_y_e
+            y_e_mask = y_e.round() # N * O * dim_y_e
+            y_e_inv_mask = y_e.round().lt(0.5).type_as(y_e) # N * O * dim_y_e
             h_o = y_e_mask * (h_o - h_o_prev) + h_o_prev  # N * O * dim_h_o
             # h_o = y_e_mask * h_o  # N * O * dim_h_o
             y_e = y_e_mask * y_e  # N * O * dim_y_e
             y_p = y_e_mask * y_p  # N * O * dim_y_p
             Y_a = y_e_mask.view(-1, o.O, o.dim_y_e, 1, 1) * Y_a  # N * O * D * h * w
+            global_agent_pos = y_e_mask * pos.unsqueeze(1).expand(o.N, o.O, 2)
+            global_tracker_offset = y_p[:, :, -2:] * torch.Tensor([o.H // 2, o.W // 2]).cuda()
+            if phase == 'obs':
+                memor = (y_e_inv_mask * memor) + global_agent_pos + global_tracker_offset
 
         if self.t == o.T - 1:
             print(y_e.data.view(-1, o.O)[0:1, 0:min(o.O, 10)])
 
-        return h_o, y_e, y_l, y_p, Y_s, Y_a
-
-    def partial_obs_h_to_pos_map(self, h_o, pos):
-        """
-        h_o: N * O * dim_h_o
-        pos: N * O * 2
-        """
-        self.linear_h_pos_k = nn.Linear(o.dim_h_o, 2)
-        self.cosine_similarity = nn.CosineSimilarity(dim=1)
+        return memor, h_o, y_e, y_l, y_p, Y_s, Y_a
         
-        ## Attention Keys
-        k = self.linear_h_pos_k(h_o.view(-1, o.dim_h_o)) # NO * 2
-        pos_cos = smd.Identity()(pos.view(-1, 2)) # NO * 2
-        smd.norm_grad(pos_cos, 1)
-        s = self.cosine_similarity(pos_cos, k).view(o.N, o.O) # N * O
-        w = self.softmax(s) # N * O
-
-        # Read vector
-        w = w.view(-1, 1, 1) # NO * 1 * 1
-        smd.norm_grad(w, 1)
-        r_pos = w.bmm(h_o.view(-1, 1, o.dim_h_o)).view(-1, o.dim_h_o) # NO * dim_h_o
-        return r_pos
-
-        
-    def generate_outputs(self, h_o, pos, phase):
+    def generate_outputs(self, h_o, pos):
 
         # Generate outputs
         # h_o = smd.CheckBP('h_o', 0)(h_o)
         o = self.o
-
-        if pos is not None:
-            fcn_ip = self.partial_obs_h_to_pos_map(h_o, pos.unsqueeze(1).expand(o.N, o.O, 2))
-        else:
-            fcn_ip = h_o.view(-1, o.dim_h_o)
-
+        fcn_ip = h_o.view(-1, o.dim_h_o)
         a = self.fcn(fcn_ip) # NO * dim_y
-        a_e = a[:, 0:o.dim_y_e] # NO * dim_y_e
-        a_l = a[:, o.dim_y_e:o.dim_y_e+o.dim_y_l] # NO * dim_y_l
-        a_p = a[:, o.dim_y_e+o.dim_y_l:o.dim_y_e+o.dim_y_l+o.dim_y_p] # NO * dim_y_p
-        a_s = a[:, o.dim_y_e+o.dim_y_l+o.dim_y_p:o.dim_y_e+o.dim_y_l+o.dim_y_p+o.dim_Y_s] # NO * dim_Y_s
-        a_a = a[:, o.dim_y_e+o.dim_y_l+o.dim_y_p+o.dim_Y_s:o.dim_y_e+o.dim_y_l+o.dim_y_p+o.dim_Y_s+o.dim_Y_a] # NO * dim_Y_aa
+        #a_e = a[:, 0:o.dim_y_e] # NO * dim_y_e
+        a_l = a[:, 0:o.dim_y_l] # NO * dim_y_l
+        a_p = a[:, o.dim_y_l:o.dim_y_l+o.dim_y_p] # NO * dim_y_p
+        a_s = a[:, o.dim_y_l+o.dim_y_p:o.dim_y_l+o.dim_y_p+o.dim_Y_s] # NO * dim_Y_s
+        a_a = a[:, o.dim_y_l+o.dim_y_p+o.dim_Y_s:o.dim_y_l+o.dim_y_p+o.dim_Y_s+o.dim_Y_a] # NO * dim_Y_aa
 
+        #print(a.shape, a_l.shape, a_p.shape, a_s.shape, a_a.shape)
         # y_e
-        # a_e = smd.CheckBP('a_e', 0)(a_e)
-        y_e = a_e.tanh().abs()
-        y_e = y_e.view(-1, o.O, o.dim_y_e) # N * O * dim_y_e
+        #a_e = smd.CheckBP('a_e', 0)(a_e)
+        #y_e = a_e.tanh().abs().view(o.N, o.O, o.dim_y_e)
+        #if phase == 'obs':
+        #    for j in range(o.N):
+        #        mem[j][tuple(pos)] = y_e[j]
+        #else:
+        #    for j in range(o.N):
+        #        y_e[j] = mem[j][tuple(pos)] if tuple(pos) in mem[j] else torch.rand_like(y_e[j])
+        #p = torch.cat((a_e.view(-1, o.dim_y_e), y_e_prev.view(-1, o.dim_y_e)), 1)
+        #y_e = self.linear_h_to_conf(p).tanh().abs().view(o.N, o.O, o.dim_y_e) # N * O * dim_y_e
+        pos = pos / 60
+        inp = pos.unsqueeze(1).expand(o.N, o.O, 2).contiguous().view(-1, 2)
+        y_e = self.linear_pos_to_conf(inp).tanh().abs().view(o.N, o.O, o.dim_y_e)
+
 
         # y_l
         # a_l = smd.CheckBP('a_l', 0)(a_l)
@@ -208,14 +239,13 @@ class NTMCell(nn.Module):
     def __init__(self, o):
         super(NTMCell, self).__init__()
         self.o = o
-        self.linear_h_pos_k = nn.Linear(o.dim_h_o, 2)
         self.linear_k = nn.Linear(o.dim_h_o, o.dim_C2_2)
         self.linear_b = nn.Linear(o.dim_h_o, 1)
         self.linear_e = nn.Linear(o.dim_h_o, o.dim_C2_2)
         self.linear_v = nn.Linear(o.dim_h_o, o.dim_C2_2)
         self.cosine_similarity = nn.CosineSimilarity(dim=2)
         self.softmax = nn.Softmax(dim=1)
-        self.rnn_cell = nn.GRUCell(o.dim_C2_2 + 2, o.dim_h_o)
+        self.rnn_cell = nn.GRUCell(o.dim_C2_2, o.dim_h_o)
         self.ha = int(round(np.sqrt(o.dim_C2_1*o.H/o.W)))
         self.wa = int(round(np.sqrt(o.dim_C2_1*o.W/o.H)))
         self.att = torch.Tensor(o.O, self.ha, self.wa).cuda()
@@ -256,23 +286,9 @@ class NTMCell(nn.Module):
         w1 = w.unsqueeze(1) # N * 1 * C2_1
         smd.norm_grad(w1, 1)
         r = w1.bmm(C).squeeze(1) # N * C2_2
-        
-
-        ## Attention Keys for position
-        #k = self.linear_h_pos_k(h_o_prev.view(-1, o.dim_h_o)) # N * 2
-        #pos_cos = smd.Identity()(pos) # N * 2
-        #smd.norm_grad(pos_cos, 1)
-        #s = nn.CosineSimilarity(dim=1)(pos_cos, k).view(o.N, 1) # N * 1
-        #w = self.softmax(s) # N * 1
-
-        # Read vector
-        #w = w.unsqueeze(-1) # N * 1 * 1
-        #smd.norm_grad(w, 1)
-        #r_pos = w.bmm(pos.unsqueeze(1)).view(-1, 2) # N * 2
 
         # RNN
-        rnn_ip = r if pos is None else torch.cat((r, pos), dim=1)
-        h_o = self.rnn_cell(rnn_ip, h_o_prev)
+        h_o = self.rnn_cell(r, h_o_prev)
         
         if "no_mem" not in o.exp_config:
             # Erase vector
